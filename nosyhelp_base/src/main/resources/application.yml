@@ -1,0 +1,13 @@
+server: 
+  port: 9001
+spring: 
+  application:  
+    name: nosyhelp-base #指定服务名
+  datasource:  
+    driverClassName: com.mysql.jdbc.Driver
+    url: jdbc:mysql://47.102.197.81:3306/xsb?useUnicode=true&amp;characterEncoding=UTF8
+    username: root
+    password: 123456
+  jpa: 
+    database: MySQL
+    show-sql: true
