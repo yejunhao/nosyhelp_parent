@@ -1,0 +1,100 @@
+import org.activiti.engine.ProcessEngine;
+import org.activiti.spring.SpringProcessEngineConfiguration;
+import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
+import org.springframework.jdbc.datasource.lookup.AbstractRoutingDataSource;
+import org.springframework.transaction.PlatformTransactionManager;
+
+import javax.sql.DataSource;
+import java.lang.reflect.Field;
+import java.util.Map;
+
+/**
+ * IT用户库影子引擎配置
+ * 作用：从 DynamicDataSource 中提取 "HK-HBAP-IT-DEFAULT" 数据源，
+ * 并启动一个独立的 Activiti 引擎专门负责扫描和执行该库的定时/异步任务。
+ */
+@Configuration
+public class ItUserSidecarConfig {
+
+    // 你指定的 Key
+    private static final String IT_TENANT_KEY = "HK-HBAP-IT-DEFAULT";
+
+    /**
+     * 1. 【核心步骤】提取真实数据源
+     * 通过反射，从 Spring 的 AbstractRoutingDataSource 中获取内部存储的 map，
+     * 然后拿出 Key 为 "HK-HBAP-IT-DEFAULT" 的物理数据源。
+     */
+    @Bean(name = "itRealDataSource")
+    public DataSource itRealDataSource(@Qualifier("dynamicDataSource") DataSource dynamicDataSource) {
+        // 1. 检查类型
+        if (!(dynamicDataSource instanceof AbstractRoutingDataSource)) {
+            throw new IllegalStateException("注入的 dynamicDataSource 不是 AbstractRoutingDataSource 类型，无法提取内部数据源！");
+        }
+
+        try {
+            // 2. 使用反射获取父类中的 resolvedDataSources 字段
+            // (这是 Spring 存储所有已解析数据源的 Map，字段是 protected 的，外部拿不到，必须用反射)
+            Field resolvedDataSourcesField = AbstractRoutingDataSource.class.getDeclaredField("resolvedDataSources");
+            resolvedDataSourcesField.setAccessible(true);
+            
+            @SuppressWarnings("unchecked")
+            Map<Object, DataSource> dataSources = (Map<Object, DataSource>) resolvedDataSourcesField.get(dynamicDataSource);
+
+            // 3. 根据 Key 获取具体的 DataSource
+            DataSource targetDataSource = dataSources.get(IT_TENANT_KEY);
+
+            if (targetDataSource == null) {
+                throw new IllegalStateException("在动态数据源中找不到 Key 为 [" + IT_TENANT_KEY + "] 的配置！请检查 Key 是否拼写正确。");
+            }
+
+            return targetDataSource;
+
+        } catch (NoSuchFieldException | IllegalAccessException e) {
+            throw new RuntimeException("尝试从动态数据源提取物理数据源失败", e);
+        }
+    }
+
+    /**
+     * 2. 为提取出来的物理数据源配置独立的事务管理器
+     * (影子引擎必须使用直连库的事务管理器，不能用主线程的那个动态管理)
+     */
+    @Bean(name = "itRealTransactionManager")
+    public PlatformTransactionManager itRealTransactionManager(@Qualifier("itRealDataSource") DataSource itRealDataSource) {
+        return new DataSourceTransactionManager(itRealDataSource);
+    }
+
+    /**
+     * 3. 配置并启动影子引擎
+     */
+    @Bean(name = "itSidecarProcessEngine")
+    public ProcessEngine itSidecarProcessEngine(
+            @Qualifier("itRealDataSource") DataSource itRealDataSource,
+            @Qualifier("itRealTransactionManager") PlatformTransactionManager transactionManager) {
+
+        SpringProcessEngineConfiguration config = new SpringProcessEngineConfiguration();
+
+        // --- 基础连接配置 ---
+        config.setDataSource(itRealDataSource);
+        config.setTransactionManager(transactionManager);
+
+        // --- 核心功能配置 ---
+        // 自动检查表结构（防止测试库缺少 Activiti 表）
+        config.setDatabaseSchemaUpdate(SpringProcessEngineConfiguration.DB_SCHEMA_UPDATE_TRUE);
+
+        // 【关键】：开启异步执行器！
+        // 这个引擎启动后，会初始化一个线程池，专门对着 HK-HBAP-IT-DEFAULT 库扫描 ACT_RU_TIMER_JOB 表
+        config.setAsyncExecutorActivate(true);
+        
+        // 建议设置一下线程池名称前缀，方便排查日志
+        // config.setAsyncExecutorThreadPoolName("ItUser-Async-Job-");
+
+        // --- 隔离配置 ---
+        // 给引擎起个独立的名字，绝对不能叫 "default"
+        config.setProcessEngineName("engine-" + IT_TENANT_KEY);
+
+        return config.buildProcessEngine();
+    }
+}
