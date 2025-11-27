@@ -1,9 +1,10 @@
 import org.activiti.engine.ProcessEngine;
-import org.activiti.engine.impl.asyncexecutor.DefaultAsyncJobExecutor; // 引入默认执行器
+import org.activiti.spring.SpringAsyncExecutor; // 必须引用这个类
 import org.activiti.spring.SpringProcessEngineConfiguration;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor; // Spring 线程池
 import org.springframework.transaction.PlatformTransactionManager;
 
 import javax.sql.DataSource;
@@ -12,10 +13,9 @@ import javax.sql.DataSource;
 public class ItUserSidecarConfig {
 
     private static final String IT_TENANT_KEY = "HK-HBAP-IT-DEFAULT";
-    // 给影子引擎起个独一无二的名字，方便日志排查
     private static final String SIDECAR_ENGINE_NAME = "sidecar-IT-engine";
 
-    // ... (保留之前的 itRealDataSource 和 itRealTransactionManager 代码) ...
+    // ... (保留你之前的 itRealDataSource 和 itRealTransactionManager 代码) ...
 
     @Bean(name = "itSidecarProcessEngine")
     public ProcessEngine itSidecarProcessEngine(
@@ -24,28 +24,37 @@ public class ItUserSidecarConfig {
 
         SpringProcessEngineConfiguration config = new SpringProcessEngineConfiguration();
 
-        // 1. 基础连接
+        // 1. 基础连接配置
         config.setDataSource(itRealDataSource);
         config.setTransactionManager(transactionManager);
         config.setDatabaseSchemaUpdate("true");
 
-        // 2. 【关键修正】显式配置并启动 AsyncExecutor
-        DefaultAsyncJobExecutor asyncExecutor = new DefaultAsyncJobExecutor();
+        // 2. 【修正】配置支持自定义线程名的 SpringAsyncExecutor
         
-        // 设置扫描间隔 (例如 3秒扫一次，方便你测试观察)
-        asyncExecutor.setDefaultAsyncJobAcquireWaitTimeInMillis(3000);
-        // 设置线程池里的线程名称前缀，让你在日志里一眼看到它！
-        asyncExecutor.setThreadPoolNamingPattern("sidecar-IT-worker-");
-        
-        config.setAsyncExecutor(asyncExecutor);
-        config.setAsyncExecutorActivate(true); // 告诉引擎启动时同时也启动这个Executor
+        // A. 先创建一个 Spring 的线程池 (这里可以随意设置前缀)
+        ThreadPoolTaskExecutor springTaskExecutor = new ThreadPoolTaskExecutor();
+        springTaskExecutor.setCorePoolSize(5);
+        springTaskExecutor.setMaxPoolSize(10);
+        springTaskExecutor.setQueueCapacity(100);
+        springTaskExecutor.setThreadNamePrefix("sidecar-IT-worker-"); // <--- 这里设置前缀！
+        springTaskExecutor.initialize(); // 务必手动初始化
 
-        // 3. 【关键修正】强制设置引擎名称
-        // 如果这里不设，或者设重复了，Activiti 内部注册时会打架，导致 execution 获取混乱
+        // B. 创建 Activiti 的 Spring 专用执行器
+        SpringAsyncExecutor asyncExecutor = new SpringAsyncExecutor();
+        // 将 Spring 线程池注入进去，这样 Activiti 执行任务时就会用这个池子
+        asyncExecutor.setTaskExecutor(springTaskExecutor);
+        asyncExecutor.setRejectedJobsHandler(new org.activiti.engine.impl.asyncexecutor.CallerRunsRejectedJobsHandler());
+        asyncExecutor.setDefaultAsyncJobAcquireWaitTimeInMillis(3000); // 3秒扫一次
+
+        // C. 设置到配置中
+        config.setAsyncExecutor(asyncExecutor);
+        config.setAsyncExecutorActivate(true);
+
+        // 3. 强制设置引擎名称 (防止 ID 冲突)
         config.setProcessEngineName(SIDECAR_ENGINE_NAME);
 
         ProcessEngine engine = config.buildProcessEngine();
-        System.out.println(">>> 影子引擎 [ " + SIDECAR_ENGINE_NAME + " ] 强制启动完成 <<<");
+        System.out.println(">>> 影子引擎 [ " + SIDECAR_ENGINE_NAME + " ] 启动完成，使用线程前缀: sidecar-IT-worker- <<<");
         return engine;
     }
 }
