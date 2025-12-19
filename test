@@ -1,60 +1,33 @@
-import org.activiti.engine.ProcessEngine;
-import org.activiti.spring.SpringAsyncExecutor; // 必须引用这个类
-import org.activiti.spring.SpringProcessEngineConfiguration;
-import org.springframework.beans.factory.annotation.Qualifier;
-import org.springframework.context.annotation.Bean;
-import org.springframework.context.annotation.Configuration;
-import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor; // Spring 线程池
-import org.springframework.transaction.PlatformTransactionManager;
+SELECT 
+    -- 1. 基础信息
+    RES.BUSINESS_KEY_ AS "业务Key",
+    RES.PROC_INST_ID_ AS "流程实例ID",
+    CHILD.ID_         AS "子执行流ID(用于修复)",
+    CHILD.ACT_ID_     AS "当前停留节点",
+    
+    -- 2. 诊断状态
+    CASE 
+        WHEN TIMER.ID_ IS NOT NULL THEN '正常: 等待定时器触发'
+        WHEN JOB.ID_ IS NOT NULL THEN '卡顿: 正在作业表中(可能死锁)'
+        WHEN DEAD.ID_ IS NOT NULL THEN '异常: 已进入死信队列(报错)'
+        WHEN SUSP.ID_ IS NOT NULL THEN '暂停: 流程被挂起'
+        WHEN CHILD.ID_ IS NOT NULL THEN '🔴 僵尸节点: 没有任何定时器/作业关联'
+        ELSE '已结束: 查不到活跃执行流'
+    END AS "诊断结果",
 
-import javax.sql.DataSource;
+    -- 3. 详细调试信息
+    TIMER.DUEDATE_      AS "定时器计划时间",
+    JOB.LOCK_OWNER_     AS "作业锁定人",
+    JOB.LOCK_EXP_TIME_  AS "作业锁过期时间",
+    DEAD.EXCEPTION_MSG_ AS "死信报错信息"
 
-@Configuration
-public class ItUserSidecarConfig {
+FROM ACT_RU_EXECUTION RES -- 主流程
+-- 关联子执行流 (真正干活的Token)
+LEFT JOIN ACT_RU_EXECUTION CHILD ON RES.ID_ = CHILD.PARENT_ID_
+-- 关联四张作业表
+LEFT JOIN ACT_RU_TIMER_JOB TIMER ON CHILD.ID_ = TIMER.EXECUTION_ID_
+LEFT JOIN ACT_RU_JOB JOB         ON CHILD.ID_ = JOB.EXECUTION_ID_
+LEFT JOIN ACT_RU_DEADLETTER_JOB DEAD ON CHILD.ID_ = DEAD.EXECUTION_ID_
+LEFT JOIN ACT_RU_SUSPENDED_JOB SUSP ON CHILD.ID_ = SUSP.EXECUTION_ID_
 
-    private static final String IT_TENANT_KEY = "HK-HBAP-IT-DEFAULT";
-    private static final String SIDECAR_ENGINE_NAME = "sidecar-IT-engine";
-
-    // ... (保留你之前的 itRealDataSource 和 itRealTransactionManager 代码) ...
-
-    @Bean(name = "itSidecarProcessEngine")
-    public ProcessEngine itSidecarProcessEngine(
-            @Qualifier("itRealDataSource") DataSource itRealDataSource,
-            @Qualifier("itRealTransactionManager") PlatformTransactionManager transactionManager) {
-
-        SpringProcessEngineConfiguration config = new SpringProcessEngineConfiguration();
-
-        // 1. 基础连接配置
-        config.setDataSource(itRealDataSource);
-        config.setTransactionManager(transactionManager);
-        config.setDatabaseSchemaUpdate("true");
-
-        // 2. 【修正】配置支持自定义线程名的 SpringAsyncExecutor
-        
-        // A. 先创建一个 Spring 的线程池 (这里可以随意设置前缀)
-        ThreadPoolTaskExecutor springTaskExecutor = new ThreadPoolTaskExecutor();
-        springTaskExecutor.setCorePoolSize(5);
-        springTaskExecutor.setMaxPoolSize(10);
-        springTaskExecutor.setQueueCapacity(100);
-        springTaskExecutor.setThreadNamePrefix("sidecar-IT-worker-"); // <--- 这里设置前缀！
-        springTaskExecutor.initialize(); // 务必手动初始化
-
-        // B. 创建 Activiti 的 Spring 专用执行器
-        SpringAsyncExecutor asyncExecutor = new SpringAsyncExecutor();
-        // 将 Spring 线程池注入进去，这样 Activiti 执行任务时就会用这个池子
-        asyncExecutor.setTaskExecutor(springTaskExecutor);
-        asyncExecutor.setRejectedJobsHandler(new org.activiti.engine.impl.asyncexecutor.CallerRunsRejectedJobsHandler());
-        asyncExecutor.setDefaultAsyncJobAcquireWaitTimeInMillis(3000); // 3秒扫一次
-
-        // C. 设置到配置中
-        config.setAsyncExecutor(asyncExecutor);
-        config.setAsyncExecutorActivate(true);
-
-        // 3. 强制设置引擎名称 (防止 ID 冲突)
-        config.setProcessEngineName(SIDECAR_ENGINE_NAME);
-
-        ProcessEngine engine = config.buildProcessEngine();
-        System.out.println(">>> 影子引擎 [ " + SIDECAR_ENGINE_NAME + " ] 启动完成，使用线程前缀: sidecar-IT-worker- <<<");
-        return engine;
-    }
-}
+WHERE RES.BUSINESS_KEY_ IN ('key1', 'key2', 'key3'); -- 替换这里
