@@ -13,7 +13,7 @@ import java.util.Map;
 
 public class JumpCmd implements Command<Void> {
 
-    private String executionId;   // 坏掉的儿子 ID
+    private String executionId;   // 坏掉的旧儿子 ID
     private String targetNodeId;  // 目标节点 ID
 
     public JumpCmd(String executionId, String targetNodeId) {
@@ -25,65 +25,69 @@ public class JumpCmd implements Command<Void> {
     public Void execute(CommandContext commandContext) {
         ExecutionEntityManager executionEntityManager = commandContext.getExecutionEntityManager();
 
-        // 1. 获取坏掉的子执行流
-        ExecutionEntity childExecution = executionEntityManager.findById(executionId);
-        if (childExecution == null) {
-            throw new RuntimeException("运行时找不到执行流: " + executionId);
+        // 1. 获取坏掉的旧儿子
+        ExecutionEntity oldChildExecution = executionEntityManager.findById(executionId);
+        if (oldChildExecution == null) {
+            throw new RuntimeException("找不到旧执行流: " + executionId);
         }
 
-        // 2. 获取父级执行流
-        ExecutionEntity parentExecution = childExecution.getParent();
+        // 2. 获取父级 (SubProcess)
+        ExecutionEntity parentExecution = oldChildExecution.getParent();
         if (parentExecution == null) {
-            throw new RuntimeException("父级执行流丢失: " + executionId);
+            throw new RuntimeException("父级丢失，无法重启！");
         }
 
-        // 3. 【抢救变量】(不仅是 Local，建议检查是否需要 Process 级变量，这里先只取 Local)
-        Map<String, Object> localVariables = childExecution.getVariablesLocal();
+        System.out.println("【启动修复】 父级ID: " + parentExecution.getId());
+
+        // 3. 【第一步】抢救变量 (在删除前备份)
+        Map<String, Object> localVariables = oldChildExecution.getVariablesLocal();
         
-        // 4. 找到目标节点定义
+        // 4. 【第二步】准备目标节点
         Process process = ProcessDefinitionUtil.getProcess(parentExecution.getProcessDefinitionId());
         FlowElement targetFlowElement = findFlowElementRecursively(process, targetNodeId);
         if (targetFlowElement == null) {
-            throw new RuntimeException("目标节点未找到: " + targetNodeId);
+            throw new RuntimeException("目标节点定义未找到: " + targetNodeId);
         }
 
-        System.out.println("正在执行全量修复...");
-
-        // 5. 递归删除旧数据
-        deleteExecutionRecursively(executionEntityManager, childExecution);
-
-        // 6. 【关键】创建新儿子
+        // =================================================================
+        // 🔴 核心变更：先创建新儿子 (防止父级因无子而自动关闭)
+        // =================================================================
+        System.out.println("1. 创建新执行流 (占位)...");
         ExecutionEntity newChildExecution = executionEntityManager.createChildExecution(parentExecution);
         
-        // 7. 【核心修复点】手动补全所有“户口”信息 (防止 NPE)
-        // 某些版本的 Activiti 在 createChildExecution 时不会自动透传 Root ID
+        // 5. 【暴力填充】防止任何 NPE 的可能
+        if (newChildExecution.getProcessDefinitionId() == null) {
+            newChildExecution.setProcessDefinitionId(parentExecution.getProcessDefinitionId());
+        }
         if (newChildExecution.getRootProcessInstanceId() == null) {
             newChildExecution.setRootProcessInstanceId(parentExecution.getRootProcessInstanceId());
         }
         if (newChildExecution.getProcessInstanceId() == null) {
             newChildExecution.setProcessInstanceId(parentExecution.getProcessInstanceId());
         }
-        // 补全租户ID
         if (newChildExecution.getTenantId() == null) {
             newChildExecution.setTenantId(parentExecution.getTenantId());
         }
+        // 继承父级的 Scope 属性 (通常 UserTask 不需要是 Scope，但保持默认即可)
+        newChildExecution.setActive(true);
+        newChildExecution.setScope(false); 
 
-        // 8. 恢复变量
+        // 6. 恢复变量
         if (localVariables != null && !localVariables.isEmpty()) {
             newChildExecution.setVariablesLocal(localVariables);
         }
 
-        // 9. 指向目标并激活
+        // 7. 指向目标节点
         newChildExecution.setCurrentFlowElement(targetFlowElement);
-        newChildExecution.setActive(true);
-        
-        // 10. 【双重保险】强制刷新一下实体更新，确保入库
-        executionEntityManager.update(newChildExecution);
 
-        System.out.println("新执行流已创建: " + newChildExecution.getId() + 
-                           " | RootID: " + newChildExecution.getRootProcessInstanceId());
+        // =================================================================
+        // 🔴 核心变更：新儿子站稳后，再杀旧儿子
+        // =================================================================
+        System.out.println("2. 删除旧执行流: " + oldChildExecution.getId());
+        deleteExecutionRecursively(executionEntityManager, oldChildExecution);
 
-        // 11. 触发执行
+        // 8. 触发执行 (最后一步)
+        System.out.println("3. 激活新执行流: " + newChildExecution.getId());
         ActivitiEngineAgenda agenda = commandContext.getAgenda();
         agenda.planContinueProcessOperation(newChildExecution);
 
@@ -92,13 +96,14 @@ public class JumpCmd implements Command<Void> {
 
     // 递归删除 (保持不变)
     private void deleteExecutionRecursively(ExecutionEntityManager entityManager, ExecutionEntity execution) {
+        // 再次查询以确保拿到最新状态
         List<ExecutionEntity> children = entityManager.findChildExecutionsByParentExecutionId(execution.getId());
         if (children != null) {
             for (ExecutionEntity child : children) {
                 deleteExecutionRecursively(entityManager, child);
             }
         }
-        execution.removeVariablesLocal();
+        execution.removeVariablesLocal(); // 先清变量引用
         entityManager.deleteExecutionAndRelatedData(execution, "ZOMBIE_RESET");
     }
 
