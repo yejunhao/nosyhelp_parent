@@ -2,12 +2,12 @@ SELECT
     RES.BUSINESS_KEY_ AS "业务Key",
     RES.ID_           AS "流程实例ID",
     CHILD.ACT_ID_     AS "当前停留节点",
-    TIMER.ID_         AS "新定时器ID (看到这个就有救了)",
-    TIMER.DUEDATE_    AS "下一次执行时间",
-    TIMER.CREATE_TIME_ AS "定时器创建时间"
+    -- 核心验证指标
+    TIMER.ID_         AS "新定时器ID", -- 【关键】只要这里有值，就是成功了
+    TIMER.DUEDATE_    AS "下一次执行时间" -- 【关键】应该是未来的时间
 FROM ACT_RU_EXECUTION RES
 -- 关联子执行流
 JOIN ACT_RU_EXECUTION CHILD ON RES.ID_ = CHILD.PARENT_ID_
 -- 关联定时器表
 LEFT JOIN ACT_RU_TIMER_JOB TIMER ON CHILD.ID_ = TIMER.EXECUTION_ID_
-WHERE RES.BUSINESS_KEY_ = 'key1'; -- 🔴 替换为你的业务Key
+WHERE RES.BUSINESS_KEY_ = 'key1'; -- 🔴 记得替换你的 key
