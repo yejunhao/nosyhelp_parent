@@ -14,7 +14,7 @@ import java.util.Map;
 public class JumpCmd implements Command<Void> {
 
     private String executionId;   // 坏掉的儿子 ID
-    private String targetNodeId;  // 目标节点 ID (sid-27...)
+    private String targetNodeId;  // 目标节点 ID
 
     public JumpCmd(String executionId, String targetNodeId) {
         this.executionId = executionId;
@@ -27,46 +27,66 @@ public class JumpCmd implements Command<Void> {
 
         // 1. 获取坏掉的子执行流
         ExecutionEntity childExecution = executionEntityManager.findById(executionId);
-        
-        // 如果运行时找不到，尝试去死信作业里找原来的 ExecutionID (这种情况需要你手动处理，这里假设能找到)
         if (childExecution == null) {
-            throw new RuntimeException("执行流找不到，请确认ID是否正确: " + executionId);
+            throw new RuntimeException("运行时找不到执行流: " + executionId);
         }
 
+        // 2. 获取父级执行流
         ExecutionEntity parentExecution = childExecution.getParent();
         if (parentExecution == null) {
-            throw new RuntimeException("父级执行流丢失，无法重启！ID: " + executionId);
+            throw new RuntimeException("父级执行流丢失: " + executionId);
         }
 
-        // 2. 【关键新增】抢救遗产：备份局部变量
+        // 3. 【抢救变量】(不仅是 Local，建议检查是否需要 Process 级变量，这里先只取 Local)
         Map<String, Object> localVariables = childExecution.getVariablesLocal();
-        System.out.println("抢救出的变量: " + localVariables);
-
-        // 3. 找到目标节点定义
+        
+        // 4. 找到目标节点定义
         Process process = ProcessDefinitionUtil.getProcess(parentExecution.getProcessDefinitionId());
         FlowElement targetFlowElement = findFlowElementRecursively(process, targetNodeId);
         if (targetFlowElement == null) {
-            throw new RuntimeException("目标节点定义未找到: " + targetNodeId);
+            throw new RuntimeException("目标节点未找到: " + targetNodeId);
         }
 
-        // 4. 递归清理门户 (删旧儿子和孙子)
+        System.out.println("正在执行全量修复...");
+
+        // 5. 递归删除旧数据
         deleteExecutionRecursively(executionEntityManager, childExecution);
 
-        // 5. 创建新儿子
+        // 6. 【关键】创建新儿子
         ExecutionEntity newChildExecution = executionEntityManager.createChildExecution(parentExecution);
         
-        // 6. 【关键新增】继承遗产：恢复局部变量
+        // 7. 【核心修复点】手动补全所有“户口”信息 (防止 NPE)
+        // 某些版本的 Activiti 在 createChildExecution 时不会自动透传 Root ID
+        if (newChildExecution.getRootProcessInstanceId() == null) {
+            newChildExecution.setRootProcessInstanceId(parentExecution.getRootProcessInstanceId());
+        }
+        if (newChildExecution.getProcessInstanceId() == null) {
+            newChildExecution.setProcessInstanceId(parentExecution.getProcessInstanceId());
+        }
+        // 补全租户ID
+        if (newChildExecution.getTenantId() == null) {
+            newChildExecution.setTenantId(parentExecution.getTenantId());
+        }
+
+        // 8. 恢复变量
         if (localVariables != null && !localVariables.isEmpty()) {
             newChildExecution.setVariablesLocal(localVariables);
         }
 
-        // 7. 激活并指向目标
+        // 9. 指向目标并激活
         newChildExecution.setCurrentFlowElement(targetFlowElement);
         newChildExecution.setActive(true);
+        
+        // 10. 【双重保险】强制刷新一下实体更新，确保入库
+        executionEntityManager.update(newChildExecution);
 
+        System.out.println("新执行流已创建: " + newChildExecution.getId() + 
+                           " | RootID: " + newChildExecution.getRootProcessInstanceId());
+
+        // 11. 触发执行
         ActivitiEngineAgenda agenda = commandContext.getAgenda();
         agenda.planContinueProcessOperation(newChildExecution);
-        
+
         return null;
     }
 
@@ -78,12 +98,11 @@ public class JumpCmd implements Command<Void> {
                 deleteExecutionRecursively(entityManager, child);
             }
         }
-        // 必须先清空变量引用，防止外键报错（某些版本需要）
-        execution.removeVariablesLocal(); 
+        execution.removeVariablesLocal();
         entityManager.deleteExecutionAndRelatedData(execution, "ZOMBIE_RESET");
     }
 
-    // 查找节点 (保持不变)
+    // 递归查找 (保持不变)
     private FlowElement findFlowElementRecursively(FlowElementsContainer container, String id) {
         FlowElement element = container.getFlowElement(id);
         if (element != null) return element;
