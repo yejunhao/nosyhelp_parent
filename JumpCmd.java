@@ -25,8 +25,7 @@ public class JumpCmd implements Command<Void> {
         ExecutionEntity childExecution = commandContext.getExecutionEntityManager().findById(executionId);
         
         if (childExecution == null) {
-            // 如果Runtime里找不到，可能只剩死信表里有了，这种只能先SQL删死信，再重启流程
-            throw new RuntimeException("在运行时表中找不到执行流，请确认它不在死信队列中: " + executionId);
+            throw new RuntimeException("运行时表中找不到执行流 (请先清理死信表): " + executionId);
         }
 
         // 2. 获取父级执行流 (SubProcess)
@@ -35,7 +34,7 @@ public class JumpCmd implements Command<Void> {
             throw new RuntimeException("严重错误：该节点没有父级，无法执行父级重启策略！ID: " + executionId);
         }
 
-        // 3. 找到目标节点定义 (从流程定义中找)
+        // 3. 找到目标节点定义
         Process process = ProcessDefinitionUtil.getProcess(parentExecution.getProcessDefinitionId());
         FlowElement targetFlowElement = findFlowElementRecursively(process, targetNodeId);
         
@@ -44,14 +43,13 @@ public class JumpCmd implements Command<Void> {
         }
 
         System.out.println("正在执行父级重启策略...");
+
+        // 4. 【修正处】删除坏掉的子执行流 (只传两个参数)
         System.out.println("1. 删除损坏的子执行流: " + childExecution.getId());
-
-        // 4. 【关键步骤】删除坏掉的子执行流 (包括它的定时器、变量等所有关联数据)
-        // 这里的 "ZOMBIE_RESET" 是删除原因，方便查日志
         commandContext.getExecutionEntityManager()
-                .deleteExecutionAndRelatedData(childExecution, "ZOMBIE_RESET", false);
+                .deleteExecutionAndRelatedData(childExecution, "ZOMBIE_RESET");
 
-        // 5. 【关键步骤】由父级创建一个全新的子执行流
+        // 5. 由父级创建一个全新的子执行流
         System.out.println("2. 父级 (" + parentExecution.getId() + ") 创建新子执行流");
         ExecutionEntity newChildExecution = commandContext.getExecutionEntityManager()
                 .createChildExecution(parentExecution);
@@ -68,7 +66,7 @@ public class JumpCmd implements Command<Void> {
         return null;
     }
 
-    // 递归查找工具方法 (保持不变)
+    // 递归查找工具方法
     private FlowElement findFlowElementRecursively(FlowElementsContainer container, String id) {
         FlowElement element = container.getFlowElement(id);
         if (element != null) return element;
