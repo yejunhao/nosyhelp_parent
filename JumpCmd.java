@@ -1,7 +1,6 @@
 import org.activiti.bpmn.model.FlowElement;
 import org.activiti.bpmn.model.FlowElementsContainer;
 import org.activiti.bpmn.model.Process;
-import org.activiti.bpmn.model.SubProcess;
 import org.activiti.engine.ActivitiEngineAgenda;
 import org.activiti.engine.impl.interceptor.Command;
 import org.activiti.engine.impl.interceptor.CommandContext;
@@ -12,8 +11,8 @@ import java.util.Collection;
 
 public class JumpCmd implements Command<Void> {
 
-    private String executionId;
-    private String targetNodeId;
+    private String executionId;   // 那个坏掉的儿子 ID (sid-27...)
+    private String targetNodeId;  // 目标节点 ID (sid-27...)
 
     public JumpCmd(String executionId, String targetNodeId) {
         this.executionId = executionId;
@@ -22,49 +21,61 @@ public class JumpCmd implements Command<Void> {
 
     @Override
     public Void execute(CommandContext commandContext) {
-        ExecutionEntity execution = commandContext.getExecutionEntityManager().findById(executionId);
-        if (execution == null) {
-            throw new RuntimeException("执行流不存在: " + executionId);
-        }
-
-        // 获取流程定义模型
-        Process process = ProcessDefinitionUtil.getProcess(execution.getProcessDefinitionId());
+        // 1. 获取坏掉的子执行流
+        ExecutionEntity childExecution = commandContext.getExecutionEntityManager().findById(executionId);
         
-        // 关键修改：使用递归查找，支持子流程中的节点
-        FlowElement targetFlowElement = findFlowElementRecursively(process, targetNodeId);
-
-        if (targetFlowElement == null) {
-            throw new RuntimeException("目标节点未找到 (请检查ID是否正确/是否在子流程内): " + targetNodeId);
+        if (childExecution == null) {
+            // 如果Runtime里找不到，可能只剩死信表里有了，这种只能先SQL删死信，再重启流程
+            throw new RuntimeException("在运行时表中找不到执行流，请确认它不在死信队列中: " + executionId);
         }
 
-        // 执行跳转
-        execution.setCurrentFlowElement(targetFlowElement);
-        execution.setActive(true);
+        // 2. 获取父级执行流 (SubProcess)
+        ExecutionEntity parentExecution = childExecution.getParent();
+        if (parentExecution == null) {
+            throw new RuntimeException("严重错误：该节点没有父级，无法执行父级重启策略！ID: " + executionId);
+        }
+
+        // 3. 找到目标节点定义 (从流程定义中找)
+        Process process = ProcessDefinitionUtil.getProcess(parentExecution.getProcessDefinitionId());
+        FlowElement targetFlowElement = findFlowElementRecursively(process, targetNodeId);
+        
+        if (targetFlowElement == null) {
+            throw new RuntimeException("目标节点定义未找到: " + targetNodeId);
+        }
+
+        System.out.println("正在执行父级重启策略...");
+        System.out.println("1. 删除损坏的子执行流: " + childExecution.getId());
+
+        // 4. 【关键步骤】删除坏掉的子执行流 (包括它的定时器、变量等所有关联数据)
+        // 这里的 "ZOMBIE_RESET" 是删除原因，方便查日志
+        commandContext.getExecutionEntityManager()
+                .deleteExecutionAndRelatedData(childExecution, "ZOMBIE_RESET", false);
+
+        // 5. 【关键步骤】由父级创建一个全新的子执行流
+        System.out.println("2. 父级 (" + parentExecution.getId() + ") 创建新子执行流");
+        ExecutionEntity newChildExecution = commandContext.getExecutionEntityManager()
+                .createChildExecution(parentExecution);
+        
+        // 6. 让新儿子指向目标节点
+        newChildExecution.setCurrentFlowElement(targetFlowElement);
+        newChildExecution.setActive(true);
+
+        // 7. 触发执行
+        System.out.println("3. 激活新执行流: " + newChildExecution.getId());
         ActivitiEngineAgenda agenda = commandContext.getAgenda();
-        agenda.planContinueProcessOperation(execution);
+        agenda.planContinueProcessOperation(newChildExecution);
 
         return null;
     }
 
-    /**
-     * 递归查找节点 (能够穿透 SubProcess)
-     */
+    // 递归查找工具方法 (保持不变)
     private FlowElement findFlowElementRecursively(FlowElementsContainer container, String id) {
-        // 1. 先尝试在当前层级找
         FlowElement element = container.getFlowElement(id);
-        if (element != null) {
-            return element;
-        }
-
-        // 2. 如果找不到，遍历所有子元素，看有没有子容器(SubProcess)
-        Collection<FlowElement> children = container.getFlowElements();
-        for (FlowElement child : children) {
+        if (element != null) return element;
+        for (FlowElement child : container.getFlowElements()) {
             if (child instanceof FlowElementsContainer) {
-                // 3. 递归进入子容器查找
                 FlowElement found = findFlowElementRecursively((FlowElementsContainer) child, id);
-                if (found != null) {
-                    return found;
-                }
+                if (found != null) return found;
             }
         }
         return null;
