@@ -1,15 +1,19 @@
+import org.activiti.bpmn.model.FlowElement;
+import org.activiti.bpmn.model.FlowElementsContainer;
+import org.activiti.bpmn.model.Process;
+import org.activiti.bpmn.model.SubProcess;
+import org.activiti.engine.ActivitiEngineAgenda;
 import org.activiti.engine.impl.interceptor.Command;
 import org.activiti.engine.impl.interceptor.CommandContext;
 import org.activiti.engine.impl.persistence.entity.ExecutionEntity;
 import org.activiti.engine.impl.util.ProcessDefinitionUtil;
-import org.activiti.bpmn.model.FlowElement;
-import org.activiti.bpmn.model.Process;
-import org.activiti.engine.ActivitiEngineAgenda;
+
+import java.util.Collection;
 
 public class JumpCmd implements Command<Void> {
 
-    private String executionId;   // 子执行流ID (Child Execution ID)
-    private String targetNodeId;  // 目标节点ID (例如 "callReceived")
+    private String executionId;
+    private String targetNodeId;
 
     public JumpCmd(String executionId, String targetNodeId) {
         this.executionId = executionId;
@@ -18,33 +22,51 @@ public class JumpCmd implements Command<Void> {
 
     @Override
     public Void execute(CommandContext commandContext) {
-        // 1. 获取执行流实体
         ExecutionEntity execution = commandContext.getExecutionEntityManager().findById(executionId);
         if (execution == null) {
             throw new RuntimeException("执行流不存在: " + executionId);
         }
 
-        // 2. 获取流程定义模型 (BPMN Model)
-        // Activiti 8 使用 ProcessDefinitionUtil 来获取缓存的流程定义
+        // 获取流程定义模型
         Process process = ProcessDefinitionUtil.getProcess(execution.getProcessDefinitionId());
-        FlowElement targetFlowElement = process.getFlowElement(targetNodeId);
+        
+        // 关键修改：使用递归查找，支持子流程中的节点
+        FlowElement targetFlowElement = findFlowElementRecursively(process, targetNodeId);
 
         if (targetFlowElement == null) {
-            throw new RuntimeException("目标节点不存在: " + targetNodeId);
+            throw new RuntimeException("目标节点未找到 (请检查ID是否正确/是否在子流程内): " + targetNodeId);
         }
 
-        // 3. 核心修复逻辑
-        // A. 将当前执行流指向目标节点
+        // 执行跳转
         execution.setCurrentFlowElement(targetFlowElement);
-        
-        // B. 激活执行流 (防止它是挂起或未激活状态)
         execution.setActive(true);
-
-        // C. 使用 Agenda 调度器触发执行
-        // 这是 Activiti 7/8 与 旧版本最大的区别，必须通过 Agenda 计划下一步操作
         ActivitiEngineAgenda agenda = commandContext.getAgenda();
         agenda.planContinueProcessOperation(execution);
 
+        return null;
+    }
+
+    /**
+     * 递归查找节点 (能够穿透 SubProcess)
+     */
+    private FlowElement findFlowElementRecursively(FlowElementsContainer container, String id) {
+        // 1. 先尝试在当前层级找
+        FlowElement element = container.getFlowElement(id);
+        if (element != null) {
+            return element;
+        }
+
+        // 2. 如果找不到，遍历所有子元素，看有没有子容器(SubProcess)
+        Collection<FlowElement> children = container.getFlowElements();
+        for (FlowElement child : children) {
+            if (child instanceof FlowElementsContainer) {
+                // 3. 递归进入子容器查找
+                FlowElement found = findFlowElementRecursively((FlowElementsContainer) child, id);
+                if (found != null) {
+                    return found;
+                }
+            }
+        }
         return null;
     }
 }
