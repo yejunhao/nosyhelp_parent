@@ -1,33 +1,18 @@
-SELECT 
-    -- 1. 基础信息
-    RES.BUSINESS_KEY_ AS "业务Key",
-    RES.PROC_INST_ID_ AS "流程实例ID",
-    CHILD.ID_         AS "子执行流ID(用于修复)",
-    CHILD.ACT_ID_     AS "当前停留节点",
-    
-    -- 2. 诊断状态
-    CASE 
-        WHEN TIMER.ID_ IS NOT NULL THEN '正常: 等待定时器触发'
-        WHEN JOB.ID_ IS NOT NULL THEN '卡顿: 正在作业表中(可能死锁)'
-        WHEN DEAD.ID_ IS NOT NULL THEN '异常: 已进入死信队列(报错)'
-        WHEN SUSP.ID_ IS NOT NULL THEN '暂停: 流程被挂起'
-        WHEN CHILD.ID_ IS NOT NULL THEN '🔴 僵尸节点: 没有任何定时器/作业关联'
-        ELSE '已结束: 查不到活跃执行流'
-    END AS "诊断结果",
+标题： Non working location application-XXXXresource name(Staff ID)-CSI-Date
+正文： 
 
-    -- 3. 详细调试信息
-    TIMER.DUEDATE_      AS "定时器计划时间",
-    JOB.LOCK_OWNER_     AS "作业锁定人",
-    JOB.LOCK_EXP_TIME_  AS "作业锁过期时间",
-    DEAD.EXCEPTION_MSG_ AS "死信报错信息"
+Hi XX,
 
-FROM ACT_RU_EXECUTION RES -- 主流程
--- 关联子执行流 (真正干活的Token)
-LEFT JOIN ACT_RU_EXECUTION CHILD ON RES.ID_ = CHILD.PARENT_ID_
--- 关联四张作业表
-LEFT JOIN ACT_RU_TIMER_JOB TIMER ON CHILD.ID_ = TIMER.EXECUTION_ID_
-LEFT JOIN ACT_RU_JOB JOB         ON CHILD.ID_ = JOB.EXECUTION_ID_
-LEFT JOIN ACT_RU_DEADLETTER_JOB DEAD ON CHILD.ID_ = DEAD.EXECUTION_ID_
-LEFT JOIN ACT_RU_SUSPENDED_JOB SUSP ON CHILD.ID_ = SUSP.EXECUTION_ID_
+Here to inform the case of XXXX(account ID), XXXX(resource name) needs to working in XXX(city, province) from XXX(Date, DDMMYYYY) to XXX(Date, DDMMYYYY), duration is XXX(7days) due to XX(Spring Festival).
 
-WHERE RES.BUSINESS_KEY_ IN ('key1', 'key2', 'key3'); -- 替换这里
+Detailed justification as: XXXXX
+
+
+
+··客户方关于异地办公的处理原则（除以下理由，其他理由的申请请部门严格审视，并在报备邮件中写清合理理由）：
+To handling with service provider working in non-contractual city case, the principle is：
+—   Supplier must keep HSDC informed on such cases.
+—   Justification should be relevant to below items, other requests will be regarded as exceptional case.
+–    Majeure forced reasons, e.g. natural hazard, war, other pandemic restrictions etc.
+–    Other government requirements.
+—   To ensure working efficiency, supplier should confirm resources can be back to offices within 2 hours.
