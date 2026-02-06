@@ -1,0 +1,74 @@
+在内网环境下，由于无法访问外部的 NVD（国家漏洞库）数据库，传统的 `dependency-check` 插件会因为尝试连接外网而失败（403 或超时）。
+
+针对你接手后的情况，最快捷、有效且适合内网落地的方案是：**“基于 Sonar 既有报告 + Maven 依赖管理 (DependencyManagement) 的强制版本覆盖策略”**。
+
+---
+
+## 内网 CVE 治理方案：强制版本覆盖法
+
+既然 Sonar 已经识别出了 CVE 并导致 Nexus 拦截，说明 **“哪些包有问题”** 这一步已经由 Sonar 完成了。你不需要再运行 `mvn dependency-check`（它在内网很难跑通），而是直接利用 Sonar 的结果进行闭环处理。
+
+### 1. 准确定位：提取漏洞路径
+
+首先，你不仅要查出哪个包有漏洞，还要知道它是被谁引入的。
+在内网终端执行以下命令，将依赖树输出到文件：
+
+```bash
+mvn dependency:tree -Dverbose -DoutputFile=tree.txt
+
+```
+
+* **操作：** 在 `tree.txt` 中搜索 Sonar 报错的特定 `artifactId`。
+* **目的：** 确认该包是**直接依赖**（你项目 POM 里写的）还是**传递依赖**（你依赖的包又依赖了它）。
+
+---
+
+### 2. 核心修复：在根 POM 中使用 `dependencyManagement`
+
+这是处理 CVE 最快捷的方法。你不需要去一个个修改子模块，也不需要排查所有的 `exclusion`，只需在项目**最顶层的父 POM** 中强制定义版本。
+
+```xml
+<dependencyManagement>
+    <dependencies>
+        <dependency>
+            <groupId>org.apache.logging.log4j</groupId>
+            <artifactId>log4j-core</artifactId>
+            <version>2.17.1</version> </dependency>
+    </dependencies>
+</dependencyManagement>
+
+```
+
+> **原理：** Maven 的 `dependencyManagement` 具有“版本仲裁”权。即便第三方 SDK 引入了旧版本的漏洞包，Maven 也会强制将其替换为你在此处声明的安全版本。
+
+---
+
+### 3. 处理 Nexus 403 拦截的关键步骤
+
+由于 Nexus 开启了防火墙或安全插件（如 Nexus IQ），当你尝试下载新版本时，如果该版本在内网私服不存在且 Nexus 无法上外网代理，你会遇到 403。
+
+* **步骤 A：检查私服已有版本。** 在内网 Nexus 界面搜索该组件，找一个版本号接近但没有漏洞的（通常是补丁小版本）。
+* **步骤 B：离线导入。** 如果内网 Nexus 完全没有安全版本，你需要通过**“内网导入流程”**，从外网环境下载安全版本的 `.jar` 和 `.pom` 文件，手动上传至 Nexus 的 `3rd party` 宿主仓库。
+
+---
+
+### 4. 验证与闭环
+
+修改完 POM 后，按以下步骤测试：
+
+1. **清理本地仓库：** `mvn clean`（防止本地缓存了之前的旧包干扰）。
+2. **重新构建：** `mvn install -DskipTests`。如果能构建成功，说明 Nexus 不再拦截。
+3. **二次核对：** 再次运行 `mvn dependency:tree`，搜索目标组件，确认版本号已变为安全版本。
+4. **推送 Sonar：** 重新触发流水线或 Sonar 扫描，确认 CVE 告警消失。
+
+---
+
+### 方案流程图
+
+### 为什么这个方案最有效？
+
+* **避开了工具缺陷：** 不再依赖需要联网的 `dependency-check` 插件。
+* **最小化改动：** 无需在各个子模块写大量的 `<exclusions>`。
+* **集中管控：** 所有 CVE 修复记录都在父 POM 中清晰可见。
+
+**你需要我帮你写一个自动从 Sonar 报告中提取漏洞组件名称并生成 `dependencyManagement` 代码段的脚本吗？**
