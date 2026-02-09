@@ -1,61 +1,42 @@
-针对您反馈的配置未生效问题，通常是因为 Maven 的依赖仲裁机制（最先声明优先）或者 **Parent POM 中硬编码的版本号**优先级高于您的 `properties`。
+<properties>
+    <joda-time.version>2.12.7</joda-time.version>
+    <netty.version>4.2.8.Final</netty.version>
+    <logback.version>1.5.19</logback.version>
+    <log4j2.version>2.24.3</log4j2.version>
+</properties>
 
-既然简单的 `properties` 覆盖没能生效（例如 `log4j-api` 依然是 2.23.1），我们需要使用更强硬的手段：**在 `dependencyManagement` 中进行“版本锚定”**。
-
-请按照以下结构彻底重构您的 `pom.xml`：
-
-### 1. 终极修复方案：`dependencyManagement` 强制锁定
-
-在您的 `pom.xml` 中，找到或添加 `<dependencyManagement>` 标签。这个标签的作用是：无论依赖树有多深，只要匹配到这些 Artifact，就必须强制使用指定版本。
-
-```xml
 <dependencyManagement>
     <dependencies>
         <dependency>
-            <groupId>org.apache.logging.log4j</groupId>
-            <artifactId>log4j-api</artifactId>
-            <version>2.24.1</version>
+            <groupId>joda-time</groupId>
+            <artifactId>joda-time</artifactId>
+            <version>${joda-time.version}</version>
         </dependency>
-        <dependency>
-            <groupId>org.apache.logging.log4j</groupId>
-            <artifactId>log4j-to-slf4j</artifactId>
-            <version>2.24.1</version>
-        </dependency>
-
         <dependency>
             <groupId>io.netty</groupId>
-            <artifactId>netty-transport</artifactId>
-            <version>4.1.115.Final</version>
-        </dependency>
-
-        <dependency>
-            <groupId>xalan</groupId>
-            <artifactId>serializer</artifactId>
-            <version>2.7.3</version>
+            <artifactId>netty-bom</artifactId>
+            <version>${netty.version}</version>
+            <type>pom</type>
+            <scope>import</scope>
         </dependency>
         <dependency>
-            <groupId>xalan</groupId>
-            <artifactId>xalan</artifactId>
-            <version>2.7.3</version>
+            <groupId>ch.qos.logback</groupId>
+            <artifactId>logback-core</artifactId>
+            <version>${logback.version}</version>
         </dependency>
-
         <dependency>
-            <groupId>org.apache.velocity</groupId>
-            <artifactId>velocity-engine-core</artifactId>
-            <version>2.4</version>
+            <groupId>ch.qos.logback</groupId>
+            <artifactId>logback-classic</artifactId>
+            <version>${logback.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.logging.log4j</groupId>
+            <artifactId>log4j-api</artifactId>
+            <version>${log4j2.version}</version>
         </dependency>
     </dependencies>
 </dependencyManagement>
 
-```
-
----
-
-### 2. 针对 Eureka Client 的特殊处理 (Exclusions)
-
-从您的截图看，`commons-configuration:1.10` 和 `commons-lang:2.6` 是通过 `eureka-client` 引入的。由于这些属于旧版本的不同 Artifact ID，`dependencyManagement` 可能无法直接拦截，必须在引入处**手术式排除**：
-
-```xml
 <dependencies>
     <dependency>
         <groupId>org.springframework.cloud</groupId>
@@ -66,46 +47,9 @@
                 <artifactId>commons-configuration</artifactId>
             </exclusion>
             <exclusion>
-                <groupId>commons-jxpath</groupId>
-                <artifactId>commons-jxpath</artifactId>
-            </exclusion>
-            <exclusion>
                 <groupId>commons-lang</groupId>
                 <artifactId>commons-lang</artifactId>
             </exclusion>
         </exclusions>
     </dependency>
-
-    <dependency>
-        <groupId>org.apache.commons</groupId>
-        <artifactId>commons-configuration2</artifactId>
-        <version>2.11.0</version>
-    </dependency>
 </dependencies>
-
-```
-
----
-
-### 3. 为什么之前的 `properties` 没生效？
-
-1. **优先级问题**：Spring Boot 3.3.13 的 Parent POM 可能使用了插件或直接在 `dependencyManagement` 中写死了版本号。当冲突发生时，Maven 可能会遵循“近邻原则”或 Parent 里的强制声明。
-2. **强制刷新**：修改 `pom.xml` 后，请务必执行以下操作：
-* 在 IntelliJ 右侧 Maven 面板点击 **"Reload All Maven Projects"**（那个圆圈箭头图标）。
-* 在终端运行：`mvn clean install -U`（`-U` 表示强制更新快照和依赖）。
-
-
-
----
-
-### 4. 验证您的修改
-
-操作完成后，请再次打开 **Dependency Analyzer**：
-
-1. 搜索 `log4j-api`，右侧应该显示 `2.24.1 (managed from 2.23.1)`。
-2. 搜索 `commons-configuration`，确认 **1.10** 的节点已经变为灰色虚线（表示已排除），且列表中只有 **2.11.0**。
-
-**关于 `jquery-1.11.0.js`：**
-这个通常藏在 `resources/static` 目录下或者是某个 Webjar 里。如果是文件形式存在，您需要手动去官网下载 `3.7.1` 的 JS 文件进行替换并修改 HTML 引用。
-
-您需要我帮您定位 `jquery` 到底是在项目代码里还是在某个 JAR 包里吗？
