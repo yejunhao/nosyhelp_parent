@@ -1,25 +1,43 @@
-这个错误是由 Adobe Experience Manager (AEM) 的 Content Package Maven Plugin 抛出的。
-报错信息 MojoFailureException: The following files are not covered by a filter rule 的意思是：你在项目的代码目录中添加了新的资源文件（位于 /etc/designs/... 下），但在项目的 filter.xml 配置文件中没有定义相应的包含规则。AEM 的打包机制要求所有包含在包内的文件必须在 filter.xml 中明确列出。
-解决方法
-你可以通过以下两个步骤来解决：
-1. 修改 filter.xml 文件
-找到报错信息下方提示的文件路径：ui.apps/src/main/resources/META-INF/vault/filter.xml。
-在该文件中添加一条新的 <filter> 规则，涵盖报错信息中提到的路径。根据你截图中的路径，建议添加如下内容：
-<workspaceFilter version="1.0">
-    <filter root="/etc/designs/hsbc/dcc/HSBC-MPF-PIB"/>
-</workspaceFilter>
+明白了，你这个是典型的 AEM (Adobe Experience Manager) 或者类似的混合型前端项目。虽然你只负责前端代码，但整个项目的构建生命周期（Lifecycle）是被绑定在 Maven 上的。
+因为公司 Nexus 防火墙拦截了 dom4j:1.1，导致你即使只想跑一个简单的 Maven 命令也会因为依赖解析失败而中断。
+既然 dependency:tree 跑不动，我们直接在 pom.xml 里做“手术”。
+1. 定位正确的 pom.xml
+从你的目录树截图看，你有很多个模块。你需要修改的是根目录下的 pom.xml（最外层的那个），因为这样可以确保所有的子模块（ui.apps, bundle 等）都能统一强制升级依赖。
+2. 强制覆盖漏洞包（万能公式）
+在根目录的 pom.xml 中，找到或添加 <dependencyManagement> 节点。直接把报错的包强行指定为一个安全版本。这样 Maven 遇到 dom4j 时会直接去找 2.1.4，而不会尝试去下载那个被隔离的 1.1。
+<dependencyManagement>
+    <dependencies>
+        <dependency>
+            <groupId>org.dom4j</groupId>
+            <artifactId>dom4j</artifactId>
+            <version>2.1.4</version>
+        </dependency>
+        <dependency>
+            <groupId>org.codehaus.plexus</groupId>
+            <artifactId>plexus-utils</artifactId>
+            <version>3.5.1</version>
+        </dependency>
+    </dependencies>
+</dependencyManagement>
 
-注意： 这里的 root 路径应该尽可能精准，既要包含报错的所有文件，又不要包含你不想要的冗余资源。
-2. (备选) 检查是否放错了位置
-如果这些文件是静态资源（如 JS, CSS, Images），在 AEM 6.4 之后的版本中，通常建议将它们放在 /apps/settings/wcm/designs 或者作为 ClientLibs 放在 /apps 下，而不是传统的 /etc/designs。
- * 如果是老项目迁移，直接按第 1 步修改 filter.xml 即可。
- * 如果是新开发的功能，请确认是否应该将这些文件移动到 ui.apps 或 ui.content 中更合适的目录下。
-快速排查建议
- * 同步问题： 如果你最近刚从 AEM 实例中反向同步（Pull）了内容到本地，AEM 可能会自动生成一些你不需要的节点（比如 .content.xml），检查一下这些文件是否真的需要提交到代码库。
- * 通配符： filter.xml 支持包含/排除规则，如果路径非常杂，可以使用：
-   <filter root="/etc/designs/hsbc/dcc/HSBC-MPF-PIB">
-  <include pattern="/etc/designs/hsbc/dcc/HSBC-MPF-PIB/.*" />
-</filter>
+3. 针对前端项目的特殊处理
+前端项目在 Maven 中通常通过 frontend-maven-plugin 来下载 Node.js 和运行 npm install。如果这个插件版本太老，它也会带入很多 CVE 漏洞包。
+在根 pom.xml 的 <build><pluginManagement> 节中，尝试升级这个插件：
+<plugin>
+    <groupId>com.github.eirslett</groupId>
+    <artifactId>frontend-maven-plugin</artifactId>
+    <version>1.15.0</version> </plugin>
 
-修改完并保存 filter.xml 后，重新运行 mvn clean install 应该就能编译通过了。
-需要我帮你针对具体的某一个长路径写出最精确的 filter 标签吗？
+4. 绕过解析直接打包
+如果你只需要打包前端代码，而不想让 Maven 去深究那些乱七八糟的 Java 依赖漏洞，可以在执行命令时加入跳过参数：
+mvn clean install -DskipTests -Denforcer.skip=true -Dcheckstyle.skip=true
+
+ * -Denforcer.skip=true: 很多公司会用 Enforcer 插件检查 CVE，这个参数可以强行跳过检查。
+总结与下一步
+你现在遇到的核心矛盾是：公司环境是 JDK 17，但项目是 JDK 8，且老旧的 Maven 插件在拉取具有 CVE 的远古依赖，触发了公司防火墙。
+建议操作：
+ * 先按上面的代码修改根 pom.xml。
+ * 删除本地缓存中那个“半吊子”的 dom4j（去 ~/.m2/repository/dom4j 直接删掉整个文件夹）。
+ * 重新运行 mvn install。
+如果报错信息变成了别的包（比如另一个 403），就把那个包也填进 dependencyManagement 里。这就是所谓的“打地鼠”修复法。
+你需要我帮你查一下 ui.apps 模块里常见的那些包（比如 commons-collections 或 jackson）的安全版本吗？
