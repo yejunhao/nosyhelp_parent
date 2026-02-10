@@ -1,55 +1,25 @@
-<properties>
-    <joda-time.version>2.12.7</joda-time.version>
-    <netty.version>4.2.8.Final</netty.version>
-    <logback.version>1.5.19</logback.version>
-    <log4j2.version>2.24.3</log4j2.version>
-</properties>
+这个错误是由 Adobe Experience Manager (AEM) 的 Content Package Maven Plugin 抛出的。
+报错信息 MojoFailureException: The following files are not covered by a filter rule 的意思是：你在项目的代码目录中添加了新的资源文件（位于 /etc/designs/... 下），但在项目的 filter.xml 配置文件中没有定义相应的包含规则。AEM 的打包机制要求所有包含在包内的文件必须在 filter.xml 中明确列出。
+解决方法
+你可以通过以下两个步骤来解决：
+1. 修改 filter.xml 文件
+找到报错信息下方提示的文件路径：ui.apps/src/main/resources/META-INF/vault/filter.xml。
+在该文件中添加一条新的 <filter> 规则，涵盖报错信息中提到的路径。根据你截图中的路径，建议添加如下内容：
+<workspaceFilter version="1.0">
+    <filter root="/etc/designs/hsbc/dcc/HSBC-MPF-PIB"/>
+</workspaceFilter>
 
-<dependencyManagement>
-    <dependencies>
-        <dependency>
-            <groupId>joda-time</groupId>
-            <artifactId>joda-time</artifactId>
-            <version>${joda-time.version}</version>
-        </dependency>
-        <dependency>
-            <groupId>io.netty</groupId>
-            <artifactId>netty-bom</artifactId>
-            <version>${netty.version}</version>
-            <type>pom</type>
-            <scope>import</scope>
-        </dependency>
-        <dependency>
-            <groupId>ch.qos.logback</groupId>
-            <artifactId>logback-core</artifactId>
-            <version>${logback.version}</version>
-        </dependency>
-        <dependency>
-            <groupId>ch.qos.logback</groupId>
-            <artifactId>logback-classic</artifactId>
-            <version>${logback.version}</version>
-        </dependency>
-        <dependency>
-            <groupId>org.apache.logging.log4j</groupId>
-            <artifactId>log4j-api</artifactId>
-            <version>${log4j2.version}</version>
-        </dependency>
-    </dependencies>
-</dependencyManagement>
+注意： 这里的 root 路径应该尽可能精准，既要包含报错的所有文件，又不要包含你不想要的冗余资源。
+2. (备选) 检查是否放错了位置
+如果这些文件是静态资源（如 JS, CSS, Images），在 AEM 6.4 之后的版本中，通常建议将它们放在 /apps/settings/wcm/designs 或者作为 ClientLibs 放在 /apps 下，而不是传统的 /etc/designs。
+ * 如果是老项目迁移，直接按第 1 步修改 filter.xml 即可。
+ * 如果是新开发的功能，请确认是否应该将这些文件移动到 ui.apps 或 ui.content 中更合适的目录下。
+快速排查建议
+ * 同步问题： 如果你最近刚从 AEM 实例中反向同步（Pull）了内容到本地，AEM 可能会自动生成一些你不需要的节点（比如 .content.xml），检查一下这些文件是否真的需要提交到代码库。
+ * 通配符： filter.xml 支持包含/排除规则，如果路径非常杂，可以使用：
+   <filter root="/etc/designs/hsbc/dcc/HSBC-MPF-PIB">
+  <include pattern="/etc/designs/hsbc/dcc/HSBC-MPF-PIB/.*" />
+</filter>
 
-<dependencies>
-    <dependency>
-        <groupId>org.springframework.cloud</groupId>
-        <artifactId>spring-cloud-starter-netflix-eureka-client</artifactId>
-        <exclusions>
-            <exclusion>
-                <groupId>commons-configuration</groupId>
-                <artifactId>commons-configuration</artifactId>
-            </exclusion>
-            <exclusion>
-                <groupId>commons-lang</groupId>
-                <artifactId>commons-lang</artifactId>
-            </exclusion>
-        </exclusions>
-    </dependency>
-</dependencies>
+修改完并保存 filter.xml 后，重新运行 mvn clean install 应该就能编译通过了。
+需要我帮你针对具体的某一个长路径写出最精确的 filter 标签吗？
