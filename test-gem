@@ -1,10 +1,8 @@
-明白了，你这个是典型的 AEM (Adobe Experience Manager) 或者类似的混合型前端项目。虽然你只负责前端代码，但整个项目的构建生命周期（Lifecycle）是被绑定在 Maven 上的。
-因为公司 Nexus 防火墙拦截了 dom4j:1.1，导致你即使只想跑一个简单的 Maven 命令也会因为依赖解析失败而中断。
-既然 dependency:tree 跑不动，我们直接在 pom.xml 里做“手术”。
-1. 定位正确的 pom.xml
-从你的目录树截图看，你有很多个模块。你需要修改的是根目录下的 pom.xml（最外层的那个），因为这样可以确保所有的子模块（ui.apps, bundle 等）都能统一强制升级依赖。
-2. 强制覆盖漏洞包（万能公式）
-在根目录的 pom.xml 中，找到或添加 <dependencyManagement> 节点。直接把报错的包强行指定为一个安全版本。这样 Maven 遇到 dom4j 时会直接去找 2.1.4，而不会尝试去下载那个被隔离的 1.1。
+看到你提供的多张截图，情况已经很清楚了：这不仅仅是代码问题，而是公司的安全网关（Sonatype IQ/Nexus Firewall）彻底封锁了老旧版本的插件及其依赖。
+因为你正在使用 JDK 17 运行 Maven 打包一个 JDK 8 的老项目（如 AEM 项目），那些 2016 年左右的插件（如 maven-source-plugin:3.0.1）自带的依赖触发了高危漏洞拦截，导致插件本身都加载不出来，所以 IDE 里才会满屏爆红。
+要让项目跑起来，必须在父 POM (dcc-mpf-website) 中进行一次“大换血”。
+第一步：在父 POM 中强制拦截漏洞包
+不要让 Maven 自己去决定版本。在根 POM 的 <modules> 后面添加 <dependencyManagement>，强行把那些导致 403 的包升上去。即便插件内部想用旧包，Maven 也会优先听你的。
 <dependencyManagement>
     <dependencies>
         <dependency>
@@ -17,27 +15,41 @@
             <artifactId>plexus-utils</artifactId>
             <version>3.5.1</version>
         </dependency>
+        <dependency>
+            <groupId>org.assertj</groupId>
+            <artifactId>assertj-core</artifactId>
+            <version>3.24.2</version>
+        </dependency>
     </dependencies>
 </dependencyManagement>
 
-3. 针对前端项目的特殊处理
-前端项目在 Maven 中通常通过 frontend-maven-plugin 来下载 Node.js 和运行 npm install。如果这个插件版本太老，它也会带入很多 CVE 漏洞包。
-在根 pom.xml 的 <build><pluginManagement> 节中，尝试升级这个插件：
-<plugin>
-    <groupId>com.github.eirslett</groupId>
-    <artifactId>frontend-maven-plugin</artifactId>
-    <version>1.15.0</version> </plugin>
+第二步：批量升级父 POM 中的插件版本
+你截图 3、6 中变红的版本号必须手动改掉。这些旧版本在 JDK 17 下运行非常不稳定，且不符合公司的 CVE 安全策略。
+请在父 POM 的 <build><plugins> 或 <pluginManagement> 中修改：
+| 爆红插件 (artifactId) | 原版本 | 修改为（安全版本） |
+|---|---|---|
+| maven-source-plugin | 3.0.1 | 3.3.0 |
+| maven-release-plugin | 2.5.3 | 3.0.1 |
+| maven-dependency-plugin | 3.0.0 | 3.6.1 |
+| maven-enforcer-plugin | 3.6.2 | 3.4.1 |
+| exec-maven-plugin (图 8/9) | (旧版) | 3.1.1 |
+第三步：解决 content-package  packaging 报错
+截图 8 底部的红色提示 Unknown packaging: content-package 说明 Maven 找不到处理 AEM 包的插件。这通常是因为 filevault-package-maven-plugin 下载失败了。
+操作： 确保你在父 POM 中定义了该插件的版本（建议使用 1.1.6 或更高），并确认它没有被父 POM 的其他配置干扰。
+第四步：彻底清理并重装
+修改完 POM 后，IDE 的红色可能不会立即消失，因为本地仓库还有“毒素”（.lastUpdated 文件）。
+ * 关闭 IDE。
+ * 清理本地仓库：
+   在终端执行以下命令（彻底删除这些损坏的插件目录）：
+   rm -rf ~/.m2/repository/org/apache/maven/plugins
+rm -rf ~/.m2/repository/org/codehaus/plexus
+rm -rf ~/.m2/repository/org/dom4j
 
-4. 绕过解析直接打包
-如果你只需要打包前端代码，而不想让 Maven 去深究那些乱七八糟的 Java 依赖漏洞，可以在执行命令时加入跳过参数：
-mvn clean install -DskipTests -Denforcer.skip=true -Dcheckstyle.skip=true
+ * 命令行重新构建：
+   先用命令行跑通，再开 IDE。加入跳过参数避开安全插件的二次拦截：
+   mvn clean install -DskipTests -Denforcer.skip=true
 
- * -Denforcer.skip=true: 很多公司会用 Enforcer 插件检查 CVE，这个参数可以强行跳过检查。
-总结与下一步
-你现在遇到的核心矛盾是：公司环境是 JDK 17，但项目是 JDK 8，且老旧的 Maven 插件在拉取具有 CVE 的远古依赖，触发了公司防火墙。
-建议操作：
- * 先按上面的代码修改根 pom.xml。
- * 删除本地缓存中那个“半吊子”的 dom4j（去 ~/.m2/repository/dom4j 直接删掉整个文件夹）。
- * 重新运行 mvn install。
-如果报错信息变成了别的包（比如另一个 403），就把那个包也填进 dependencyManagement 里。这就是所谓的“打地鼠”修复法。
-你需要我帮你查一下 ui.apps 模块里常见的那些包（比如 commons-collections 或 jackson）的安全版本吗？
+总结
+你现在的爆红是因为旧插件拉取了旧依赖，被公司防火墙阻断了。通过在父 POM 中锁定 dom4j 版本并全面升级插件版本，可以绕过这些 403 错误。
+由于你正在进行 CVE 修复工作，如果你升级后又出现了新的 403 报错，请点击那个 sonatypeiq01 的链接，它会告诉你公司允许使用的最小安全版本是多少。
+需要我帮你看看如何针对前端模块（ui.apps）中的 npm install 报错进行优化吗？
