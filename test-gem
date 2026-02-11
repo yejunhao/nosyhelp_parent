@@ -1,55 +1,13 @@
-看到你提供的多张截图，情况已经很清楚了：这不仅仅是代码问题，而是公司的安全网关（Sonatype IQ/Nexus Firewall）彻底封锁了老旧版本的插件及其依赖。
-因为你正在使用 JDK 17 运行 Maven 打包一个 JDK 8 的老项目（如 AEM 项目），那些 2016 年左右的插件（如 maven-source-plugin:3.0.1）自带的依赖触发了高危漏洞拦截，导致插件本身都加载不出来，所以 IDE 里才会满屏爆红。
-要让项目跑起来，必须在父 POM (dcc-mpf-website) 中进行一次“大换血”。
-第一步：在父 POM 中强制拦截漏洞包
-不要让 Maven 自己去决定版本。在根 POM 的 <modules> 后面添加 <dependencyManagement>，强行把那些导致 403 的包升上去。即便插件内部想用旧包，Maven 也会优先听你的。
-<dependencyManagement>
-    <dependencies>
-        <dependency>
-            <groupId>org.dom4j</groupId>
-            <artifactId>dom4j</artifactId>
-            <version>2.1.4</version>
-        </dependency>
-        <dependency>
-            <groupId>org.codehaus.plexus</groupId>
-            <artifactId>plexus-utils</artifactId>
-            <version>3.5.1</version>
-        </dependency>
-        <dependency>
-            <groupId>org.assertj</groupId>
-            <artifactId>assertj-core</artifactId>
-            <version>3.24.2</version>
-        </dependency>
-    </dependencies>
-</dependencyManagement>
+@Override
+public void afterPropertiesSet() throws Exception {
+    // 1. 强制关闭 Netty 的 URL 校验。这是解决 2026/2/11 解码失败的关键
+    System.setProperty("io.netty.http.decoder.validateUrl", "false");
+    
+    // 2. 允许部分解析，增加对非标准 URL 的容错率
+    System.setProperty("io.netty.http.decoder.allowPartialHttpParsing", "true");
 
-第二步：批量升级父 POM 中的插件版本
-你截图 3、6 中变红的版本号必须手动改掉。这些旧版本在 JDK 17 下运行非常不稳定，且不符合公司的 CVE 安全策略。
-请在父 POM 的 <build><plugins> 或 <pluginManagement> 中修改：
-| 爆红插件 (artifactId) | 原版本 | 修改为（安全版本） |
-|---|---|---|
-| maven-source-plugin | 3.0.1 | 3.3.0 |
-| maven-release-plugin | 2.5.3 | 3.0.1 |
-| maven-dependency-plugin | 3.0.0 | 3.6.1 |
-| maven-enforcer-plugin | 3.6.2 | 3.4.1 |
-| exec-maven-plugin (图 8/9) | (旧版) | 3.1.1 |
-第三步：解决 content-package  packaging 报错
-截图 8 底部的红色提示 Unknown packaging: content-package 说明 Maven 找不到处理 AEM 包的插件。这通常是因为 filevault-package-maven-plugin 下载失败了。
-操作： 确保你在父 POM 中定义了该插件的版本（建议使用 1.1.6 或更高），并确认它没有被父 POM 的其他配置干扰。
-第四步：彻底清理并重装
-修改完 POM 后，IDE 的红色可能不会立即消失，因为本地仓库还有“毒素”（.lastUpdated 文件）。
- * 关闭 IDE。
- * 清理本地仓库：
-   在终端执行以下命令（彻底删除这些损坏的插件目录）：
-   rm -rf ~/.m2/repository/org/apache/maven/plugins
-rm -rf ~/.m2/repository/org/codehaus/plexus
-rm -rf ~/.m2/repository/org/dom4j
-
- * 命令行重新构建：
-   先用命令行跑通，再开 IDE。加入跳过参数避开安全插件的二次拦截：
-   mvn clean install -DskipTests -Denforcer.skip=true
-
-总结
-你现在的爆红是因为旧插件拉取了旧依赖，被公司防火墙阻断了。通过在父 POM 中锁定 dom4j 版本并全面升级插件版本，可以绕过这些 403 错误。
-由于你正在进行 CVE 修复工作，如果你升级后又出现了新的 403 报错，请点击那个 sonatypeiq01 的链接，它会告诉你公司允许使用的最小安全版本是多少。
-需要我帮你看看如何针对前端模块（ui.apps）中的 npm install 报错进行优化吗？
+    // 原有的逻辑保留
+    if (piiMaskingUtils != null) {
+        customizeNettyLogger.afterPropertiesSet(piiMaskingUtils);
+    }
+}
