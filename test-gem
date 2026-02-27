@@ -1,13 +1,1 @@
-@Override
-public void afterPropertiesSet() throws Exception {
-    // 1. 强制关闭 Netty 的 URL 校验。这是解决 2026/2/11 解码失败的关键
-    System.setProperty("io.netty.http.decoder.validateUrl", "false");
-    
-    // 2. 允许部分解析，增加对非标准 URL 的容错率
-    System.setProperty("io.netty.http.decoder.allowPartialHttpParsing", "true");
-
-    // 原有的逻辑保留
-    if (piiMaskingUtils != null) {
-        customizeNettyLogger.afterPropertiesSet(piiMaskingUtils);
-    }
-}
+https://storage.googleapis.com/chrome-for-testing-public/145.0.7632.117/win64/chromedriver-win64.zip
