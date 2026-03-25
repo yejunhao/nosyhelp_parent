@@ -1,1 +1,59 @@
-https://storage.googleapis.com/chrome-for-testing-public/145.0.7632.117/win64/chromedriver-win64.zip
+-- 开启事务 (根据你的数据库类型，如 MySQL: START TRANSACTION;)
+START TRANSACTION;
+
+-- 设定变量，替换为你的实际 processInstanceId
+SET @target_process_id = '你的processId';
+
+-- ======================================================
+-- 1. 停止所有定时任务与作业 (Runtime - Physical Delete)
+-- ======================================================
+-- 删除定时器作业 (这是停止定时任务的关键)
+DELETE FROM ACT_RU_TIMER_JOB WHERE PROCESS_INSTANCE_ID_ = @target_process_id;
+-- 删除普通作业、死信作业、暂停作业
+DELETE FROM ACT_RU_JOB WHERE PROCESS_INSTANCE_ID_ = @target_process_id;
+DELETE FROM ACT_RU_DEADLETTER_JOB WHERE PROCESS_INSTANCE_ID_ = @target_process_id;
+DELETE FROM ACT_RU_SUSPENDED_JOB WHERE PROCESS_INSTANCE_ID_ = @target_process_id;
+
+-- ======================================================
+-- 2. 清理运行时其他关联数据 (Runtime - Physical Delete)
+-- ======================================================
+DELETE FROM ACT_RU_EVENT_SUBSCR WHERE PROC_INST_ID_ = @target_process_id;
+DELETE FROM ACT_RU_VARIABLE WHERE PROC_INST_ID_ = @target_process_id;
+DELETE FROM ACT_RU_TASK WHERE PROC_INST_ID_ = @target_process_id;
+DELETE FROM ACT_RU_IDENTITYLINK WHERE PROC_INST_ID_ = @target_process_id;
+
+-- 必须最后删除执行实例，因为它有外键约束
+DELETE FROM ACT_RU_EXECUTION WHERE PROC_INST_ID_ = @target_process_id;
+
+-- ======================================================
+-- 3. 归档历史记录 (History - Logical Update)
+-- ======================================================
+-- 标记流程实例已结束
+UPDATE ACT_HI_PROCINST 
+SET 
+    END_TIME_ = NOW(), 
+    DELETE_REASON_ = 'Manual termination: Upstream data missing',
+    DURATION_ = TIMESTAMPDIFF(SECOND, START_TIME_, NOW()) * 1000
+WHERE ID_ = @target_process_id AND END_TIME_ IS NULL;
+
+-- 标记所有活动节点已结束
+UPDATE ACT_HI_ACTINST 
+SET 
+    END_TIME_ = NOW(),
+    DELETE_REASON_ = 'Cancelled by system',
+    DURATION_ = TIMESTAMPDIFF(SECOND, START_TIME_, NOW()) * 1000
+WHERE PROC_INST_ID_ = @target_process_id AND END_TIME_ IS NULL;
+
+-- 标记所有人工任务已结束（如果有）
+UPDATE ACT_HI_TASKINST 
+SET 
+    END_TIME_ = NOW(),
+    DELETE_REASON_ = 'Deleted',
+    DURATION_ = TIMESTAMPDIFF(SECOND, START_TIME_, NOW()) * 1000
+WHERE PROC_INST_ID_ = @target_process_id AND END_TIME_ IS NULL;
+
+-- ======================================================
+-- 4. 提交事务
+-- ======================================================
+COMMIT;
+
