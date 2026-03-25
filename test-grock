@@ -1,96 +1,23 @@
-**推荐方案：预缓存 OWASP Dependency-Check 的 CVE 数据，实现内网完全离线扫描（最快捷、有效、无需改 Nexus 配置）**
+-- 开始事务
+BEGIN;
 
-这是处理你当前问题的**唯一方案**，专门针对内网 + Nexus 拦截 + dependency-check 403 的场景，能让你**5-10 分钟内**在内网项目跑通 CVE 扫描，后续每天/每周更新一次缓存即可。
+-- 1. 停止流程实例的执行（将其标记为已结束）
+UPDATE ACT_RU_EXECUTION
+SET SUSPENSION_STATE_ = 2 -- 标记为暂停状态
+WHERE PROC_INST_ID_ = (SELECT PROC_INST_ID_ FROM ACT_RU_EXECUTION WHERE PROCESS_DEFINITION_ID_ = ? AND ACTIVE_ = 1);
 
-### 步骤 1：在**有外网**的机器上一次性下载最新数据（只需做一次）
-```bash
-# 先 purge 旧数据
-mvn org.owasp:dependency-check-maven:purge
+-- 2. 删除与流程实例关联的定时任务
+DELETE FROM ACT_RU_JOB
+WHERE EXECUTION_ID_ IN (SELECT ID_ FROM ACT_RU_EXECUTION WHERE PROC_INST_ID_ = ?);
 
-# 强制下载最新 NVD + 所有 analyzer 数据（会放到 Maven 本地仓库）
-mvn org.owasp:dependency-check-maven:check \
-  -Ddependency-check.autoUpdate=true \
-  -DnvdValidForHours=0 \
-  -DretireJsForceUpdate=true
-```
+-- 3. 删除与流程实例相关的定时器任务
+DELETE FROM ACT_RU_TIMER_JOB
+WHERE EXECUTION_ID_ IN (SELECT ID_ FROM ACT_RU_EXECUTION WHERE PROC_INST_ID_ = ?);
 
-下载完成后，数据会出现在：
-```
-~/.m2/repository/org/owasp/dependency-check-data/
-```
-（整个目录大概 300-800MB，包含 odc.mv.db 等文件）
+-- 4. 更新任务状态，防止其他任务继续执行（如果有的话）
+UPDATE ACT_RU_TASK
+SET SUSPENSION_STATE_ = 2 -- 暂停任务
+WHERE PROC_INST_ID_ = ?;
 
-### 步骤 2：把数据复制到**内网机器**
-- 把上面整个 `dependency-check-data` 目录复制到内网所有开发/构建机相同的路径：
-  ```
-  ~/.m2/repository/org/owasp/dependency-check-data/
-  ```
-- 如果内网机器路径不方便统一，也可以复制到一个共享目录（如 `/opt/owasp-data/`），后面在 pom 里指定。
-
-### 步骤 3：在项目 pom.xml 中固定使用本地缓存（关键配置）
-在 `<build><plugins>` 里加入或修改 dependency-check-maven（推荐版本 >= 9.x）：
-
-```xml
-<plugin>
-    <groupId>org.owasp</groupId>
-    <artifactId>dependency-check-maven</artifactId>
-    <version>10.0.4</version>   <!-- 用最新稳定版 -->
-    <executions>
-        <execution>
-            <goals>
-                <goal>check</goal>
-            </goals>
-        </execution>
-    </executions>
-    <configuration>
-        <!-- 指向你复制的缓存目录（推荐用默认路径） -->
-        <dataDirectory>${user.home}/.m2/repository/org/owasp/dependency-check-data</dataDirectory>
-        
-        <!-- 彻底关闭自动更新，防止任何外网请求 -->
-        <autoUpdate>false</autoUpdate>
-        <nvdValidForHours>999999</nvdValidForHours>
-        
-        <!-- 可选：关闭不需要的 analyzer 进一步减少请求 -->
-        <retireJsAnalyzerEnabled>false</retireJsAnalyzerEnabled>  <!-- 如果不需要 JS 库 -->
-        <!-- <hostedSuppressionsEnabled>false</hostedSuppressionsEnabled> -->
-        
-        <!-- 推荐输出格式，方便 Sonar 导入 -->
-        <formats>HTML,XML</formats>
-    </configuration>
-</plugin>
-```
-
-### 步骤 4：内网直接跑扫描（再也不会 403）
-```bash
-mvn dependency-check:check
-# 或集成到 verify 阶段：mvn verify
-```
-
-报告在 `target/dependency-check-report.html` 和 `.xml`，直接打开看 CVE 列表。
-
-### 后续处理 CVE 的快捷流程
-1. 打开报告 → 看 High/Critical 的依赖。
-2. **优先升级**：把有 CVE 的 dependency 版本改到最新无漏洞版（Nexus 通常会放行新版）。
-3. **无法升级时**：
-   - 在项目根目录加 `suppression.xml`（官方模板），suppress 掉 false-positive 或已接受的风险。
-   - 示例：
-     ```xml
-     <suppressions xmlns="https://jeremylong.github.io/DependencyCheck/dependency-suppression.1.3.xsd">
-         <suppress>
-             <notes><![CDATA[已评估，业务接受此风险]]></notes>
-             <packageUrl regex="true">^pkg:maven/com.xxx/xxx@.*$</packageUrl>
-             <cve>CVE-202x-xxxx</cve>
-         </suppress>
-     </suppressions>
-     ```
-     然后在 plugin 配置加 `<suppressionFiles>suppression.xml</suppressionFiles>`
-4. 如果用 **SonarQube**：把生成的 `dependency-check-report.xml` 路径告诉 Sonar（sonar.dependencyCheck.jsonReportPath 或 sonar.dependencyCheck.htmlReportPath），Sonar 就会把 CVE 计入 Security Hotspot。
-
-### 额外小贴士（让整个团队都爽）
-- 把 `dependency-check-data` 打成 zip，放到 Nexus 的 hosted repo 或内网共享盘。
-- CI/CD 里加一步：构建前先 `unzip owasp-data.zip -d ~/.m2/repository/org/owasp/`。
-- 每周在外网机器重新跑一次步骤 1，重新分发缓存即可（数据增量很小）。
-
-这个方案**完全绕过 Nexus 对 CVE 包的拦截**，**零外网依赖**，**5 分钟内跑通**，后续维护成本极低，是内网项目处理 CVE 最成熟、最常用的做法。
-
-直接照着做，明天就能出 CVE 报告了！有任何一步卡住，贴错误我再帮你调。
+-- 提交事务
+COMMIT;
