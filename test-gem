@@ -1,61 +1,66 @@
-BEGIN;
+旧的不会因为你改配置、重启服务就自动变成 `PT60H`。Activiti 的 timer 到达节点时，会把下一次触发时间算好并落库，通常在 `ACT_RU_TIMER_JOB.DUEDATE_`。所以：
 
--- 1. 定义变量（PG 脚本中通常使用临时变量或直接替换）
--- 请将下面的 'YOUR_PROCESS_ID' 替换为实际 ID
-DO $$
-DECLARE
-    target_id TEXT := 'YOUR_PROCESS_ID';
-    now_time TIMESTAMP := CURRENT_TIMESTAMP;
-BEGIN
+- **新部署后的新流程/新 timer**：会按 `PT60H`。
+- **旧的已生成 timer job**：仍然按原来的 `PT10S` 算出来的 `DUEDATE_` 执行。
+- **已经进入 `ACT_RU_JOB` 正在执行/待执行的 job**：更危险，可能已经被 job executor 捞起来了。
 
-    -- ======================================================
-    -- 1. 停止定时任务与作业 (Runtime - Physical Delete)
-    -- ======================================================
-    DELETE FROM ACT_RU_TIMER_JOB WHERE PROCESS_INSTANCE_ID_ = target_id;
-    DELETE FROM ACT_RU_JOB WHERE PROCESS_INSTANCE_ID_ = target_id;
-    DELETE FROM ACT_RU_DEADLETTER_JOB WHERE PROCESS_INSTANCE_ID_ = target_id;
-    DELETE FROM ACT_RU_SUSPENDED_JOB WHERE PROCESS_INSTANCE_ID_ = target_id;
+最稳处理旧数据的方式是：**停 wwf 的 ms 服务/job executor -> 备份 -> 精确查旧 timer -> 只延期目标节点的 timer job -> 重启服务**。
 
-    -- ======================================================
-    -- 2. 清理运行时其他关联数据 (Runtime - Physical Delete)
-    -- ======================================================
-    DELETE FROM ACT_RU_EVENT_SUBSCR WHERE PROC_INST_ID_ = target_id;
-    DELETE FROM ACT_RU_VARIABLE WHERE PROC_INST_ID_ = target_id;
-    DELETE FROM ACT_RU_TASK WHERE PROC_INST_ID_ = target_id;
-    DELETE FROM ACT_RU_IDENTITYLINK WHERE PROC_INST_ID_ = target_id;
+可以按这个思路处理。
 
-    -- 最后删除执行实例
-    DELETE FROM ACT_RU_EXECUTION WHERE PROC_INST_ID_ = target_id;
+```sql
+-- 1. 先看目标 timer 还有多少
+select id_,
+       process_def_id_,
+       execution_id_,
+       proc_inst_id_,
+       handler_type_,
+       handler_cfg_,
+       duedate_,
+       lock_owner_,
+       lock_exp_time_
+from act_ru_timer_job
+where handler_cfg_ like '%sid-cb49e0ad-2fbe-48b9-bdc4-2d45bd0246ec%'
+order by duedate_;
+```
 
-    -- ======================================================
-    -- 3. 归档历史记录 (History - Logical Update)
-    -- ======================================================
-    
-    -- 标记流程实例已结束
-    UPDATE ACT_HI_PROCINST 
-    SET 
-        END_TIME_ = now_time, 
-        DELETE_REASON_ = 'Manual termination: Upstream data missing',
-        -- 计算毫秒数：(结束时间 - 开始时间) 转换为秒后乘 1000
-        DURATION_ = EXTRACT(EPOCH FROM (now_time - START_TIME_)) * 1000
-    WHERE ID_ = target_id AND END_TIME_ IS NULL;
+如果能查到这些就是旧 timer。先备份：
 
-    -- 标记所有活动节点已结束
-    UPDATE ACT_HI_ACTINST 
-    SET 
-        END_TIME_ = now_time,
-        DELETE_REASON_ = 'Cancelled by system',
-        DURATION_ = EXTRACT(EPOCH FROM (now_time - START_TIME_)) * 1000
-    WHERE PROC_INST_ID_ = target_id AND END_TIME_ IS NULL;
+```sql
+create table bak_act_ru_timer_job_20260607 as
+select *
+from act_ru_timer_job
+where handler_cfg_ like '%sid-cb49e0ad-2fbe-48b9-bdc4-2d45bd0246ec%';
+```
 
-    -- 标记所有人工任务已结束
-    UPDATE ACT_HI_TASKINST 
-    SET 
-        END_TIME_ = now_time,
-        DELETE_REASON_ = 'Deleted',
-        DURATION_ = EXTRACT(EPOCH FROM (now_time - START_TIME_)) * 1000
-    WHERE PROC_INST_ID_ = target_id AND END_TIME_ IS NULL;
+然后把这些旧 timer 延后 60 小时：
 
-END $$;
+```sql
+update act_ru_timer_job
+set duedate_ = now() + interval '60 hours',
+    lock_owner_ = null,
+    lock_exp_time_ = null
+where handler_cfg_ like '%sid-cb49e0ad-2fbe-48b9-bdc4-2d45bd0246ec%';
+```
 
-COMMIT;
+如果 `handler_cfg_` 里查不到这个 BPMN 节点 ID，就不要盲改。先查这个流程相关 timer：
+
+```sql
+select id_, process_def_id_, handler_type_, handler_cfg_, duedate_
+from act_ru_timer_job
+where process_def_id_ like '%你的流程key%';
+```
+
+重点：**不要全表 update `ACT_RU_TIMER_JOB`**，一定要卡住流程定义或节点 ID。
+
+还有一个点要确认：如果有些旧任务已经从 `ACT_RU_TIMER_JOB` 转到了 `ACT_RU_JOB`，说明它们已经到期准备执行了。可以查：
+
+```sql
+select id_, process_def_id_, execution_id_, proc_inst_id_, duedate_, lock_owner_
+from act_ru_job
+where process_def_id_ like '%你的流程key%';
+```
+
+如果这里也有大量目标流程的旧 job，就需要更谨慎：这些可能已经不是“等待中的 timer”，而是“马上要执行的异步任务”。通常不建议直接改，除非你确认它们就是这个 timer 转过来的任务。
+
+一句话结论：**改 BPMN + 重启只管新的；旧的要改 `ACT_RU_TIMER_JOB.DUEDATE_`，并且必须停服务后精确筛选更新。**
