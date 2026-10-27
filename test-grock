@@ -1,23 +1,113 @@
--- 开始事务
-BEGIN;
 
--- 1. 停止流程实例的执行（将其标记为已结束）
-UPDATE ACT_RU_EXECUTION
-SET SUSPENSION_STATE_ = 2 -- 标记为暂停状态
-WHERE PROC_INST_ID_ = (SELECT PROC_INST_ID_ FROM ACT_RU_EXECUTION WHERE PROCESS_DEFINITION_ID_ = ? AND ACTIVE_ = 1);
+import json
+import argparse
+from pathlib import Path
+from collections import defaultdict
 
--- 2. 删除与流程实例关联的定时任务
-DELETE FROM ACT_RU_JOB
-WHERE EXECUTION_ID_ IN (SELECT ID_ FROM ACT_RU_EXECUTION WHERE PROC_INST_ID_ = ?);
+def trace():
+    p = argparse.ArgumentParser()
+    p.add_argument("--graph", default="graphify-out/graph.json")
+    p.add_argument("--symbol", required=True)
+    p.add_argument("--node", default=None)
+    p.add_argument("--depth", type=int, default=30)
+    p.add_argument("--out", default="callgraph.md")
+    args = p.parse_args()
 
--- 3. 删除与流程实例相关的定时器任务
-DELETE FROM ACT_RU_TIMER_JOB
-WHERE EXECUTION_ID_ IN (SELECT ID_ FROM ACT_RU_EXECUTION WHERE PROC_INST_ID_ = ?);
+    if args.depth < 0:
+        p.error("--depth must be >= 0")
 
--- 4. 更新任务状态，防止其他任务继续执行（如果有的话）
-UPDATE ACT_RU_TASK
-SET SUSPENSION_STATE_ = 2 -- 暂停任务
-WHERE PROC_INST_ID_ = ?;
+    data = json.loads(Path(args.graph).read_text(encoding="utf-8"))
+    nodes = {str(n["id"]): n for n in data["nodes"]}
+    edges = data.get("links", data.get("edges", []))
 
--- 提交事务
-COMMIT;
+    def label(nid):
+        n = nodes[nid]
+        return str(n.get("label") or n.get("name") or nid)
+
+    def node_id(value):
+        if isinstance(value, dict):
+            return str(value["id"])
+        return str(value)
+
+    calls = defaultdict(list)
+    types = {"calls", "call", "invoke", "invokes", "method_call"}
+
+    for e in edges:
+        rel = str(e.get("relation") or e.get("type") or "").lower()
+        ctx = str(e.get("context") or "").lower()
+        if rel not in types and ctx not in types:
+            continue
+
+        src = node_id(e.get("_src", e.get("source")))
+        dst = node_id(e.get("_tgt", e.get("target")))
+
+        if src in nodes and dst in nodes:
+            calls[src].append(dst)
+
+    if args.node:
+        if args.node not in nodes:
+            p.error("Node ID not found")
+        root = args.node
+    else:
+        matches = [
+            nid for nid in nodes
+            if args.symbol.lower() in label(nid).lower()
+            or args.symbol.lower() in nid.lower()
+        ]
+        if len(matches) != 1:
+            print("Matching nodes (choose one using --node):")
+            for nid in matches:
+                print(nid, label(nid))
+            return
+        root = matches[0]
+
+    result = [
+        "# Method Call Graph",
+        "",
+        "Root: " + label(root),
+        "",
+        "## DFS Call Tree",
+        "",
+    ]
+
+    def walk(nid, depth, visited):
+        prefix = "  " * depth
+        name = label(nid)
+
+        if nid in visited:
+            result.append(prefix + "- " + name + " [CYCLE]")
+            return
+
+        result.append(prefix + "- " + name)
+
+        if depth >= args.depth:
+            if calls[nid]:
+                result.append(prefix + "  - [DEPTH LIMIT]")
+            return
+
+        visited = visited | {nid}
+
+        for child in sorted(calls[nid], key=label):
+            walk(child, depth + 1, visited)
+
+    walk(root, 0, set())
+
+    result.extend([
+        "",
+        "## Statistics",
+        "",
+        "Nodes: " + str(len(nodes)),
+        "Indexed CALLS: " + str(sum(len(v) for v in calls.values())),
+        "",
+        "Note: Missing graph edges cannot be recovered by DFS.",
+    ])
+
+    output = Path(args.out)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text("\n".join(result), encoding="utf-8")
+
+    print("Saved:", output)
+    print("Lines:", len(result))
+
+if __name__ == "__main__":
+    trace()
